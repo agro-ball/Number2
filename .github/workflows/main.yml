@@ -1,12 +1,9 @@
 name: Build APK
 
-# Для сборки нужен только index.html в корне репозитория.
-# Запускается сам при пуше index.html, или вручную: Actions -> Build APK -> Run workflow.
+# Для сборки нужен только файл игры (index.html) где-то в репозитории.
+# Запускается при каждом пуше или вручную: Actions -> Build APK -> Run workflow.
 on:
   push:
-    paths:
-      - 'index.html'
-      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 permissions:
@@ -28,11 +25,29 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Подготовить игру
+      - name: Найти файл игры
         run: |
-          test -f index.html || { echo "::error::Нет index.html в корне репозитория"; exit 1; }
+          echo "Файлы в репозитории:"
+          find . -type f -not -path './.git/*' | sort | head -60
+          echo "-----"
+          SRC=""
+          for f in index.html Index.html INDEX.html; do
+            if [ -f "$f" ]; then SRC="$f"; break; fi
+          done
+          if [ -z "$SRC" ]; then
+            SRC=$(find . -type f \( -iname '*.html' -o -iname '*.htm' -o -iname '*.html.txt' \) \
+              -not -path './.git/*' -not -path './node_modules/*' -not -path './www/*' -not -path './android/*' | head -1)
+          fi
+          if [ -z "$SRC" ]; then
+            echo "::error::В репозитории нет html-файла игры. Загрузи index.html (список файлов выше)."
+            exit 1
+          fi
+          echo "Беру файл игры: $SRC"
+          if ! grep -q "ВЫБЕЙ НОМЕР" "$SRC"; then
+            echo "::warning::В файле $SRC нет текста игры. Проверь, что загрузил именно index.html из чата."
+          fi
           mkdir -p www
-          cp index.html www/index.html
+          cp "$SRC" www/index.html
 
       - name: Создать Android-проект (Capacitor)
         run: |
@@ -55,7 +70,7 @@ jobs:
           import base64, io, pathlib, re
           from PIL import Image, ImageDraw
 
-          html = pathlib.Path('index.html').read_text(encoding='utf-8')
+          html = pathlib.Path('www/index.html').read_text(encoding='utf-8')
           m = re.search(r'data:image/jpeg;base64,([A-Za-z0-9+/=]+)', html)
           src = Image.open(io.BytesIO(base64.b64decode(m.group(1)))).convert('RGB')
 

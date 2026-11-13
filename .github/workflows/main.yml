@@ -1,0 +1,116 @@
+name: Build APK
+
+# Для сборки нужен только index.html в корне репозитория.
+# Запускается сам при пуше index.html, или вручную: Actions -> Build APK -> Run workflow.
+on:
+  push:
+    paths:
+      - 'index.html'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # чтобы выложить APK в Releases
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Подготовить игру
+        run: |
+          test -f index.html || { echo "::error::Нет index.html в корне репозитория"; exit 1; }
+          mkdir -p www
+          cp index.html www/index.html
+
+      - name: Создать Android-проект (Capacitor)
+        run: |
+          npm init -y > /dev/null
+          npm install @capacitor/core@8 @capacitor/cli@8 @capacitor/android@8
+          cat > capacitor.config.json <<'JSON'
+          {
+            "appId": "com.vybeinomer.game",
+            "appName": "Выбей номер",
+            "webDir": "www",
+            "backgroundColor": "#000000"
+          }
+          JSON
+          npx cap add android
+
+      - name: Иконка, портретный режим, вибрация
+        run: |
+          pip install pillow
+          python3 - <<'PY' || echo "::warning::Иконку заменить не вышло, будет стандартная"
+          import base64, io, pathlib, re
+          from PIL import Image, ImageDraw
+
+          html = pathlib.Path('index.html').read_text(encoding='utf-8')
+          m = re.search(r'data:image/jpeg;base64,([A-Za-z0-9+/=]+)', html)
+          src = Image.open(io.BytesIO(base64.b64decode(m.group(1)))).convert('RGB')
+
+          res = pathlib.Path('android/app/src/main/res')
+          dens = {'mdpi': 1, 'hdpi': 1.5, 'xhdpi': 2, 'xxhdpi': 3, 'xxxhdpi': 4}
+          for name, k in dens.items():
+              d = res / ('mipmap-' + name)
+              d.mkdir(parents=True, exist_ok=True)
+              n = round(48 * k)
+              ic = src.resize((n, n), Image.LANCZOS)
+              ic.save(d / 'ic_launcher.png')
+              mask = Image.new('L', (n, n), 0)
+              ImageDraw.Draw(mask).ellipse((0, 0, n - 1, n - 1), fill=255)
+              rd = Image.new('RGBA', (n, n), (0, 0, 0, 0))
+              rd.paste(ic, (0, 0), mask)
+              rd.save(d / 'ic_launcher_round.png')
+              f = round(108 * k)
+              fg = Image.new('RGBA', (f, f), (0, 0, 0, 255))
+              s = int(f * 0.66)
+              fg.paste(src.resize((s, s), Image.LANCZOS), ((f - s) // 2, (f - s) // 2))
+              fg.save(d / 'ic_launcher_foreground.png')
+
+          bg = res / 'values' / 'ic_launcher_background.xml'
+          if bg.exists():
+              bg.write_text(bg.read_text().replace('#FFFFFF', '#000000'))
+          PY
+          python3 - <<'PY'
+          import pathlib
+          m = pathlib.Path('android/app/src/main/AndroidManifest.xml')
+          t = m.read_text()
+          if 'VIBRATE' not in t:
+              t = t.replace('</manifest>', '    <uses-permission android:name="android.permission.VIBRATE" />\n</manifest>')
+          if 'screenOrientation' not in t:
+              t = t.replace('<activity', '<activity\n            android:screenOrientation="portrait"', 1)
+          m.write_text(t)
+          PY
+
+      - name: Собрать APK
+        run: |
+          npx cap sync android
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk ../vybei-nomer.apk
+
+      - name: Сохранить APK как артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: vybei-nomer-apk
+          path: vybei-nomer.apk
+
+      - name: Выложить APK в Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: Выбей номер — APK
+          body: Свежая сборка. Скачай vybei-nomer.apk и установи на телефон.
+          files: vybei-nomer.apk
